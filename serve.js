@@ -1,15 +1,17 @@
 const express = require('express');
 const socketio = require('socket.io');
 const http = require('http');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketio(server);
 
-// Rota para servir o arquivo HTML
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+// Middleware básico (opcional)
+app.use(express.json()); // Para receber JSON em requisições
+
+// Rota de health check (opcional)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'online' });
 });
 
 // Configuração do Socket.IO
@@ -18,7 +20,7 @@ io.on('connection', (socket) => {
 
   socket.on('enviarMensagem', (mensagem) => {
     console.log('Mensagem recebida:', mensagem);
-    io.emit('novaMensagem', mensagem);
+    io.emit('novaMensagem', mensagem); // Broadcast para todos
   });
 
   socket.on('disconnect', () => {
