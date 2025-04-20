@@ -6,129 +6,80 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// Configuração do Socket.IO com CORS liberado
+// Configuração do Socket.IO (permitindo apenas seu frontend)
 const io = socketio(server, {
   cors: {
-    origin: "*", // Permite todas as origens (para desenvolvimento)
+    origin: "https://oceanoif.github.io",
     methods: ["GET", "POST"]
   }
 });
 
-// Middleware básico
-app.use(cors());
-app.use(express.json());
-
-// Rota de health check
+// Health Check
 app.get('/', (req, res) => {
-  res.status(200).json({ 
-    status: 'online',
-    message: 'Servidor Quiz Oceano está rodando',
-    socket: 'Conecte-se via Socket.IO na porta 3000'
-  });
+  res.send("Servidor de conexão do Quiz Oceano!");
 });
 
-// Objeto para armazenar salas
-const rooms = new Map();
+// Objeto para salas: { código: [jogador1, jogador2] }
+const rooms = {};
 
-// Gera código de sala aleatório
+// Gera um código de 4 dígitos único
 const generateRoomCode = () => {
-  const code = Math.floor(1000 + Math.random() * 9000).toString();
-  return rooms.has(code) ? generateRoomCode() : code;
+  let code;
+  do {
+    code = Math.floor(1000 + Math.random() * 9000).toString();
+  } while (rooms[code]);
+  return code;
 };
 
-// Conexão Socket.IO
+// Lógica de conexão
 io.on('connection', (socket) => {
-  console.log(`Novo cliente conectado: ${socket.id}`);
+  console.log(`👉 Novo jogador conectado: ${socket.id}`);
 
   // Criar sala
-  socket.on('create_room', () => {
+  socket.on('create_room', (callback) => {
     const roomCode = generateRoomCode();
-    rooms.set(roomCode, {
-      players: [socket.id],
-      scores: { team1: 0, team2: 0 },
-      currentTeam: 1,
-      gameStarted: false
-    });
-
+    rooms[roomCode] = [socket.id]; // Sala com o criador
     socket.join(roomCode);
-    socket.emit('room_created', roomCode);
-    console.log(`Sala criada: ${roomCode}`);
+    callback({ roomCode });
+    console.log(`🎮 Sala criada: ${roomCode}`);
   });
 
   // Entrar em sala existente
-  socket.on('join_room', (roomCode) => {
-    if (!rooms.has(roomCode)) {
-      socket.emit('join_error', 'Sala não encontrada');
+  socket.on('join_room', ({ roomCode }, callback) => {
+    if (!rooms[roomCode]) {
+      callback({ error: "Sala não encontrada!" });
+      return;
+    }
+    if (rooms[roomCode].length >= 2) {
+      callback({ error: "Sala cheia!" });
       return;
     }
 
-    const room = rooms.get(roomCode);
-    if (room.players.length >= 2) {
-      socket.emit('join_error', 'Sala cheia');
-      return;
-    }
-
-    room.players.push(socket.id);
+    rooms[roomCode].push(socket.id);
     socket.join(roomCode);
-    socket.emit('joined_room', { 
-      team: 2, 
-      roomCode 
-    });
+    callback({ success: true });
 
-    // Notifica o criador da sala
-    io.to(room.players[0]).emit('opponent_joined');
-    console.log(`Jogador ${socket.id} entrou na sala ${roomCode}`);
-  });
-
-  // Iniciar jogo (apenas host)
-  socket.on('start_game', (roomCode) => {
-    const room = rooms.get(roomCode);
-    if (room && room.players[0] === socket.id) {
-      room.gameStarted = true;
-      io.to(roomCode).emit('game_started');
-      console.log(`Jogo iniciado na sala ${roomCode}`);
-    }
-  });
-
-  // Atualizar placar
-  socket.on('update_score', ({ roomCode, team, points }) => {
-    const room = rooms.get(roomCode);
-    if (room) {
-      team === 1 ? room.scores.team1 += points : room.scores.team2 += points;
-      room.currentTeam = team === 1 ? 2 : 1; // Alterna turno
-      
-      io.to(roomCode).emit('score_updated', {
-        scores: room.scores,
-        currentTeam: room.currentTeam
-      });
-
-      // Verifica vencedor (alvo: 100 pontos)
-      if (room.scores.team1 >= 100 || room.scores.team2 >= 100) {
-        const winner = room.scores.team1 >= 100 ? 1 : 2;
-        io.to(roomCode).emit('game_over', { winner });
-        rooms.delete(roomCode);
-      }
-    }
+    // Avisa ao criador que alguém entrou
+    io.to(rooms[roomCode][0]).emit('opponent_joined');
+    console.log(`🚪 Jogador ${socket.id} entrou na sala ${roomCode}`);
   });
 
   // Desconexão
   socket.on('disconnect', () => {
-    console.log(`Cliente desconectado: ${socket.id}`);
-    // Remove de todas as salas
-    rooms.forEach((room, code) => {
-      room.players = room.players.filter(id => id !== socket.id);
-      if (room.players.length === 0) {
-        rooms.delete(code);
-      } else {
-        io.to(room.players[0]).emit('opponent_left');
+    console.log(`❌ Jogador desconectado: ${socket.id}`);
+    // Remove jogador de todas as salas
+    for (const [code, players] of Object.entries(rooms)) {
+      const index = players.indexOf(socket.id);
+      if (index !== -1) {
+        players.splice(index, 1);
+        if (players.length === 0) delete rooms[code]; // Apaga sala vazia
+        else io.to(code).emit('opponent_left'); // Avisa ao outro jogador
       }
-    });
+    }
   });
 });
 
-// Inicia o servidor
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`Acesse: http://localhost:${PORT}`);
 });
