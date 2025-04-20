@@ -6,195 +6,129 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// Configuração do Socket.IO com CORS
+// Configuração do Socket.IO com CORS liberado
 const io = socketio(server, {
   cors: {
-    origin: "*",
+    origin: "*", // Permite todas as origens (para desenvolvimento)
     methods: ["GET", "POST"]
   }
 });
 
-// Middleware
+// Middleware básico
 app.use(cors());
 app.use(express.json());
 
 // Rota de health check
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'online' });
+app.get('/', (req, res) => {
+  res.status(200).json({ 
+    status: 'online',
+    message: 'Servidor Quiz Oceano está rodando',
+    socket: 'Conecte-se via Socket.IO na porta 3000'
+  });
 });
 
-// Objeto para armazenar as salas
-const rooms = {};
-const roomCodes = new Set();
+// Objeto para armazenar salas
+const rooms = new Map();
 
-// Função para gerar código único de 4 dígitos
-function generateRoomCode() {
-  let code;
-  do {
-    code = Math.floor(1000 + Math.random() * 9000).toString();
-  } while (roomCodes.has(code));
-  roomCodes.add(code);
-  return code;
-}
+// Gera código de sala aleatório
+const generateRoomCode = () => {
+  const code = Math.floor(1000 + Math.random() * 9000).toString();
+  return rooms.has(code) ? generateRoomCode() : code;
+};
 
-// Configuração do Socket.IO
+// Conexão Socket.IO
 io.on('connection', (socket) => {
-  console.log(`Novo usuário conectado: ${socket.id}`);
+  console.log(`Novo cliente conectado: ${socket.id}`);
 
-  // Criar uma nova sala
-  socket.on('createRoom', () => {
+  // Criar sala
+  socket.on('create_room', () => {
     const roomCode = generateRoomCode();
-    rooms[roomCode] = {
+    rooms.set(roomCode, {
       players: [socket.id],
-      team1Score: 0,
-      team2Score: 0,
+      scores: { team1: 0, team2: 0 },
       currentTeam: 1,
-      currentQuestion: 0,
       gameStarted: false
-    };
+    });
 
     socket.join(roomCode);
-    socket.emit('roomCreated', roomCode);
+    socket.emit('room_created', roomCode);
     console.log(`Sala criada: ${roomCode}`);
   });
 
-  // Entrar em uma sala existente
-  socket.on('joinRoom', ({ roomCode }) => {
-    if (!rooms[roomCode]) {
-      socket.emit('joinedRoom', { success: false, message: 'Sala não encontrada' });
+  // Entrar em sala existente
+  socket.on('join_room', (roomCode) => {
+    if (!rooms.has(roomCode)) {
+      socket.emit('join_error', 'Sala não encontrada');
       return;
     }
 
-    if (rooms[roomCode].players.length >= 2) {
-      socket.emit('joinedRoom', { success: false, message: 'Sala cheia' });
+    const room = rooms.get(roomCode);
+    if (room.players.length >= 2) {
+      socket.emit('join_error', 'Sala cheia');
       return;
     }
 
-    rooms[roomCode].players.push(socket.id);
+    room.players.push(socket.id);
     socket.join(roomCode);
-    
-    // Notificar o host que um jogador entrou
-    io.to(rooms[roomCode].players[0]).emit('playerJoined');
-    
-    socket.emit('joinedRoom', { 
-      success: true, 
-      roomCode,
-      team: 2 // O jogador que entra é sempre o time 2
+    socket.emit('joined_room', { 
+      team: 2, 
+      roomCode 
     });
-    
+
+    // Notifica o criador da sala
+    io.to(room.players[0]).emit('opponent_joined');
     console.log(`Jogador ${socket.id} entrou na sala ${roomCode}`);
   });
 
-  // Iniciar o jogo (apenas host)
-  socket.on('startGame', ({ roomCode }) => {
-    if (!rooms[roomCode] || rooms[roomCode].players[0] !== socket.id) {
-      return;
+  // Iniciar jogo (apenas host)
+  socket.on('start_game', (roomCode) => {
+    const room = rooms.get(roomCode);
+    if (room && room.players[0] === socket.id) {
+      room.gameStarted = true;
+      io.to(roomCode).emit('game_started');
+      console.log(`Jogo iniciado na sala ${roomCode}`);
     }
-
-    rooms[roomCode].gameStarted = true;
-    io.to(roomCode).emit('gameStarted');
-    console.log(`Jogo iniciado na sala ${roomCode}`);
   });
 
   // Atualizar placar
-  socket.on('updateScores', ({ roomCode, team1Score, team2Score, currentTeam }) => {
-    if (!rooms[roomCode]) return;
+  socket.on('update_score', ({ roomCode, team, points }) => {
+    const room = rooms.get(roomCode);
+    if (room) {
+      team === 1 ? room.scores.team1 += points : room.scores.team2 += points;
+      room.currentTeam = team === 1 ? 2 : 1; // Alterna turno
+      
+      io.to(roomCode).emit('score_updated', {
+        scores: room.scores,
+        currentTeam: room.currentTeam
+      });
 
-    rooms[roomCode].team1Score = team1Score;
-    rooms[roomCode].team2Score = team2Score;
-    rooms[roomCode].currentTeam = currentTeam;
-
-    io.to(roomCode).emit('updateScores', {
-      team1Score,
-      team2Score,
-      currentTeam
-    });
-  });
-
-  // Notificar seleção de resposta
-  socket.on('answerSelected', ({ roomCode, team, correct, points }) => {
-    if (!rooms[roomCode]) return;
-
-    io.to(roomCode).emit('answerSelected', {
-      team,
-      correct,
-      points
-    });
-  });
-
-  // Próxima pergunta
-  socket.on('nextQuestion', ({ roomCode, currentIndex }) => {
-    if (!rooms[roomCode]) return;
-
-    rooms[roomCode].currentQuestion = currentIndex;
-    io.to(roomCode).emit('nextQuestion', { currentIndex });
-  });
-
-  // Fim de jogo
-  socket.on('gameOver', ({ roomCode, winner }) => {
-    if (!rooms[roomCode]) return;
-
-    io.to(roomCode).emit('gameOver', { winner });
-    console.log(`Jogo encerrado na sala ${roomCode}. Vencedor: Equipe ${winner}`);
-    
-    // Limpar sala após o jogo
-    delete rooms[roomCode];
-    roomCodes.delete(roomCode);
+      // Verifica vencedor (alvo: 100 pontos)
+      if (room.scores.team1 >= 100 || room.scores.team2 >= 100) {
+        const winner = room.scores.team1 >= 100 ? 1 : 2;
+        io.to(roomCode).emit('game_over', { winner });
+        rooms.delete(roomCode);
+      }
+    }
   });
 
   // Desconexão
   socket.on('disconnect', () => {
-    console.log(`Usuário desconectado: ${socket.id}`);
-    
-    // Remover jogador de todas as salas
-    for (const roomCode in rooms) {
-      const index = rooms[roomCode].players.indexOf(socket.id);
-      if (index !== -1) {
-        rooms[roomCode].players.splice(index, 1);
-        
-        // Notificar outro jogador sobre a desconexão
-        if (rooms[roomCode].players.length > 0) {
-          io.to(rooms[roomCode].players[0]).emit('playerDisconnected');
-        }
-        
-        // Limpar sala se estiver vazia
-        if (rooms[roomCode].players.length === 0) {
-          delete rooms[roomCode];
-          roomCodes.delete(roomCode);
-        }
+    console.log(`Cliente desconectado: ${socket.id}`);
+    // Remove de todas as salas
+    rooms.forEach((room, code) => {
+      room.players = room.players.filter(id => id !== socket.id);
+      if (room.players.length === 0) {
+        rooms.delete(code);
+      } else {
+        io.to(room.players[0]).emit('opponent_left');
       }
-    }
+    });
   });
 });
 
-// Configuração dos IPs estáticos (opcional - para whitelist)
-const allowedIPs = ['35.160.120.126', '44.233.151.27', '34.211.200.85'];
-
-// Middleware para verificar IP (opcional)
-app.use((req, res, next) => {
-  const clientIP = req.ip.replace('::ffff:', '');
-  
-  if (allowedIPs.includes(clientIP) || process.env.NODE_ENV === 'development') {
-    next();
-  } else {
-    console.log(`Acesso negado para IP: ${clientIP}`);
-    res.status(403).send('Acesso não autorizado');
-  }
-});
-
-// Adicione um timeout para salas vazias
-setInterval(() => {
-  for (const roomCode in rooms) {
-    if (rooms[roomCode].players.length === 0) {
-      delete rooms[roomCode];
-      roomCodes.delete(roomCode);
-      console.log(`Sala ${roomCode} removida por inatividade`);
-    }
-  }
-}, 600000); // 10 minutos
-
+// Inicia o servidor
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`Acessível em: https://backendoceano-1.onrender.com`);
+  console.log(`Acesse: http://localhost:${PORT}`);
 });
