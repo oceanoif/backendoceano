@@ -182,8 +182,19 @@ app.use((req, res, next) => {
   }
 });
 
+// Adicione um timeout para salas vazias
+setInterval(() => {
+  for (const roomCode in rooms) {
+    if (rooms[roomCode].players.length === 0) {
+      delete rooms[roomCode];
+      roomCodes.delete(roomCode);
+      console.log(`Sala ${roomCode} removida por inatividade`);
+    }
+  }
+}, 600000); // 10 minutos
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
-  console.log(`IPs permitidos: ${allowedIPs.join(', ')}`);
+  console.log(`Acessível em: https://backendoceano-1.onrender.com`);
 });
